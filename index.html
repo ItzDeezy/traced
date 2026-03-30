@@ -1083,9 +1083,14 @@ function _setUIInner(s){
     if(lastScore<40){cv.classList.add('shake');cv.addEventListener('animationend',()=>cv.classList.remove('shake'),{once:true});}
     setTimeout(()=>{el('score-wrap').className='score-wrap show';animateScore(lastScore);},60);
     const isLast=scores.length+1>=ROUNDS;
-    setTimeout(()=>setBtns(`<button class="pri" id="main-btn">${isLast?'results →':'next →'}</button>`),80);
-    setTimeout(()=>{el('btn-row').className='btn-row fade show';},100);
-    setTimeout(()=>{if(el('main-btn'))el('main-btn').onclick=nextRound;setStatus('',false,'space to continue');},120);
+    // in multiplayer: no next button, round advances automatically
+    if(MP.role&&MP.gameStarted){
+      setTimeout(()=>setStatus('waiting for others...',true,''),80);
+    } else {
+      setTimeout(()=>setBtns(`<button class="pri" id="main-btn">${isLast?'results →':'next →'}</button>`),80);
+      setTimeout(()=>{el('btn-row').className='btn-row fade show';},100);
+      setTimeout(()=>{if(el('main-btn'))el('main-btn').onclick=nextRound;setStatus('',false,'space to continue');},120);
+    }
     paint();setTimeout(()=>doReflash(),280);
   }
   if(s==='final'){
@@ -1333,7 +1338,9 @@ function mpInitHost(){
     conn.on('open',()=>{
       MP.conns[conn.peer]=conn;
       // send current state to new joiner
-      conn.send({type:'welcome',players:MP.players,settings:MP.settings,code:MP.code});
+      const _hostN=MP.myName&&MP.myName!=='host'?MP.myName:'host';
+if(!MP.players[MP.myId])MP.players[MP.myId]={name:_hostN+' (host)',scores:[]};
+conn.send({type:'welcome',players:MP.players,settings:MP.settings,code:MP.code,hostId:MP.myId});
       conn.on('data',d=>mpHandleAsHost(conn.peer,d));
       conn.on('close',()=>mpPlayerLeft(conn.peer));
     });
@@ -1382,6 +1389,7 @@ function mpHandleAsHost(peerId,data){
     const name=data.name||'player';
     MP.players[peerId]={name,scores:[]};
     mpBroadcast({type:'player_joined',id:peerId,name});
+    mpBroadcast({type:'player_list',players:MP.players});
     mpSyncSend(peerId,{type:'welcome',players:MP.players,settings:MP.settings,code:MP.code});
     mpUpdateHostLobbyList();
     mpUpdatePlayerCount();
@@ -1392,6 +1400,7 @@ function mpHandleAsHost(peerId,data){
     MP.submittedCount++;
     mpUpdateHud();
     const total=Object.keys(MP.conns).length+1;
+    mpBroadcast({type:'submitted',count:MP.submittedCount,total});
     if(MP.submittedCount>=total)mpHostAdvanceRound();
   }
 }
@@ -1416,6 +1425,7 @@ function mpUpdateHostLobbyList(){
 function mpHandleAsGuest(data){
   if(data.type==='welcome'){
     MP.players=data.players;
+    if(data.hostId)MP.hostId=data.hostId;
     clearInterval(MP.waitDots);
     const list=el('mp-join-player-list');if(!list)return;
     list.innerHTML='';
@@ -1425,6 +1435,7 @@ function mpHandleAsGuest(data){
       list.appendChild(d);
     });
   }
+  if(data.type==='player_list'){Object.entries(data.players).forEach(([id,p])=>{if(MP.players[id])MP.players[id].name=p.name;else MP.players[id]={name:p.name,scores:[]};});}
   if(data.type==='player_joined'){
     MP.players[data.id]={name:data.name,scores:[]};
   }
@@ -1443,15 +1454,38 @@ function mpHandleAsGuest(data){
     mpStartClientGame();
   }
   if(data.type==='round_end'){
-    // show between-round scores
     MP.roundScores=data.scores;
     if(MP.players[MP.myId])MP.players[MP.myId].scores.push(lastScore||0);
     mpShowBetweenRound(data.roundNum);
-    setTimeout(()=>{el('mp-between').classList.remove('show');},3200);
+    // don't auto-dismiss — host sends next_round or game_end to control timing
   }
   if(data.type==='next_round'){
     el('mp-between').classList.remove('show');
-    mpStartRound();
+    round++;
+    MP.mpRound=data.roundNum||MP.mpRound;
+    mpRunRound();
+  }
+  if(data.type==='submitted'){
+    MP.submittedCount=data.count;
+    const gt=Object.keys(MP.players).length+1;
+    mpShowHud(MP.timerLeft>0?MP.timerLeft:null,data.count,data.total||gt);
+  }
+  if(data.type==='draw_start'){
+    const elapsed=Math.floor((Date.now()-data.startTime)/1000);
+    const remaining=data.drawTime>0?Math.max(1,data.drawTime-elapsed):0;
+    MP.timerLeft=remaining;
+    clearInterval(MP.timerInterval);
+    const gt=Object.keys(MP.players).length+1;
+    if(data.drawTime>0){
+      mpShowHud(remaining,0,gt);
+      MP.timerInterval=setInterval(()=>{
+        MP.timerLeft--;
+        mpShowHud(MP.timerLeft,MP.submittedCount,gt);
+        if(MP.timerLeft<=0){clearInterval(MP.timerInterval);mpTimeUp();}
+      },1000);
+    } else {
+      mpShowHud(null,0,gt);
+    }
   }
   if(data.type==='game_end'){
     el('mp-between').classList.remove('show');
@@ -1517,7 +1551,13 @@ function mpRunRound(){
 function mpRunFlash(){
   poly=genPoly(diff);path=[];
   setUI('flash',true);sfxFlash();
-  setTimeout(()=>{setUI('draw',true);sfxDraw();mpStartDrawTimer();},DIFFS[diff].ms);
+  setTimeout(()=>{
+    setUI('draw',true);sfxDraw();
+    if(MP.role==='host'||!MP.gameStarted){
+      mpStartDrawTimer();
+      if(MP.gameStarted) mpBroadcast({type:'draw_start',startTime:Date.now(),drawTime:MP.settings.drawTime});
+    }
+  },DIFFS[diff].ms);
 }
 
 function mpStartDrawTimer(){
@@ -1538,6 +1578,7 @@ function mpTimeUp(){
   if(path.length>3){sfxSubmit();lastScore=iou(poly,path);}
   else lastScore=0;
   showScoreFlash(lastScore);
+  scores.push(lastScore);allPolys.push(poly?[...poly]:null);allPaths.push(path.length>1?[...path]:null);
   if(MP.role==='host'){
     MP.roundScores[MP.myId]=lastScore;
     if(MP.players[MP.myId])MP.players[MP.myId].scores.push(lastScore);
@@ -1591,7 +1632,7 @@ function mpShowBetweenRound(roundNum){
   const list=el('mp-between-scores');list.innerHTML='';
   // build sorted list
   const entries=Object.entries(MP.roundScores).map(([id,sc])=>({
-    name:id===MP.myId?'you':MP.players[id]?.name||'?',score:sc,mine:id===MP.myId
+    name:id===MP.myId?'you':MP.players[id]?.name||'player',score:sc,mine:id===MP.myId
   })).sort((a,b)=>b.score-a.score);
   entries.forEach((e,i)=>{
     const div=document.createElement('div');div.className='mp-round-row';
@@ -1641,7 +1682,6 @@ window._mpOnUp=function(){
   if(!MP.role||!MP.gameStarted){_origOnUp();return;}
   if(!isDown)return;isDown=false;
   if(screen==='draw'&&path.length>3){
-    clearInterval(MP.timerInterval);
     sfxSubmit();lastScore=iou(poly,path);
     const s=lastScore;showScoreFlash(s);setTimeout(()=>s>=70?sfxGood():sfxBad(),180);
     setUI('result',true);
