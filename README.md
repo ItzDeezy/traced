@@ -75,4 +75,4 @@ MIT — see [LICENSE](LICENSE)
 
 ## credits
 
-Built by [Hillel (ItzDeezy)](https://github.com/itzdeezy)
+Built by [(ItzDeezy)](https://github.com/itzdeezy)
